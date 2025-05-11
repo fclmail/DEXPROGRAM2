@@ -4,8 +4,6 @@
   <meta charset="UTF-8" />
   <title>Polygon Arbitrage Bot</title>
   <script src="https://cdn.jsdelivr.net/npm/ethers/dist/ethers.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@walletconnect/web3-provider@1.8.0/dist/umd/index.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/web3modal@1.9.12/dist/index.min.js"></script>
   <style>
     body {
       background-color: #013220;
@@ -39,16 +37,12 @@
 <body>
   <h2>Polygon Arbitrage Interface</h2>
 
-  <!-- Wallet Connect Section -->
   <div>
     <button onclick="connectMetaMask()">Connect MetaMask</button>
-    <button onclick="connectWalletConnect()">Connect WalletConnect</button>
-    <button onclick="connectDeepLink()">Deep Link WalletConnect</button>
     <p><strong>Wallet:</strong> <span id="walletAddress">Not connected</span></p>
     <p><strong>USDC Balance:</strong> <span id="usdcBalance">0</span></p>
   </div>
 
-  <!-- Trading Controls -->
   <label>Trade Amount (USDC):</label>
   <input id="tradeAmount" type="number" value="10" step="0.01" />
   <label>Slippage (%):</label>
@@ -63,18 +57,16 @@
   <input id="customToken" placeholder="0x... custom token" style="width:300px;" />
   <label><input type="checkbox" id="onlyProfit" checked /> Only Trade if Profitable</label><br><br>
 
-  <!-- Start/Stop Arbitrage -->
   <button onclick="startTrading()">Start Trading</button>
   <button onclick="stopTrading()">Stop Trading</button>
   <p id="status">Status: Idle</p>
 
-  <!-- Results Table -->
   <table>
     <thead>
       <tr>
         <th>Buy From</th>
         <th>Sell To</th>
-        <th>Token In</th>
+        <th>Token</th>
         <th>USDC Out</th>
         <th>Profit</th>
         <th>Tx Hash</th>
@@ -84,26 +76,35 @@
   </table>
 
   <script>
-    let provider, signer, userAddress, web3Modal, connection;
+    let provider, signer, userAddress;
+    let tradingInterval;
+
     const tokens = {
       weth: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
-      dai: "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
+      dai:  "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
       usdt: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
       usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
     };
+
+    const routers = {
+      QuickSwap:  "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",
+      SushiSwap:  "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506",
+      ApeSwap:    "0xC0788A3aD43d79aa53B09c2EaCc313A787d1d607",
+      KyberSwap:  "0x546C79662E028B661dFB4767664d0273184E4dD1",
+      JetSwap:    "0x8aEfE7aE76cC4C1d5E457BeC89a336Eb1bE3B7Fa"
+    };
+
     const erc20ABI = [
-      "function approve(address spender, uint amount) public returns (bool)",
-      "function balanceOf(address owner) view returns (uint)"
+      "function approve(address spender, uint256 amount) public returns (bool)",
+      "function balanceOf(address owner) view returns (uint256)"
+    ];
+    const routerABI = [
+      "function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory)",
+      "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[])"
     ];
 
-    async function updateUSDCBalance() {
-      const usdc = new ethers.Contract(tokens.usdc, erc20ABI, provider);
-      const balance = await usdc.balanceOf(userAddress);
-      document.getElementById("usdcBalance").textContent = (balance / 1e6).toFixed(2);
-    }
-
     async function connectMetaMask() {
-      if (!window.ethereum) return alert("MetaMask not installed.");
+      if (!window.ethereum) return alert("MetaMask not found.");
       provider = new ethers.providers.Web3Provider(window.ethereum);
       await provider.send("eth_requestAccounts", []);
       signer = provider.getSigner();
@@ -112,51 +113,115 @@
       updateUSDCBalance();
     }
 
-    async function connectWalletConnect() {
-      const walletConnectProvider = new WalletConnectProvider.default({
-        rpc: {
-          137: "https://polygon-rpc.com"
-        },
-        chainId: 137
-      });
-      await walletConnectProvider.enable();
-      provider = new ethers.providers.Web3Provider(walletConnectProvider);
-      signer = provider.getSigner();
-      userAddress = await signer.getAddress();
-      document.getElementById("walletAddress").textContent = userAddress;
-      updateUSDCBalance();
+    async function updateUSDCBalance() {
+      const usdc = new ethers.Contract(tokens.usdc, erc20ABI, provider);
+      const balance = await usdc.balanceOf(userAddress);
+      document.getElementById("usdcBalance").textContent = (balance / 1e6).toFixed(2);
     }
 
-    async function connectDeepLink() {
-      web3Modal = new Web3Modal.default({
-        network: "polygon",
-        cacheProvider: false,
-        providerOptions: {
-          walletconnect: {
-            package: WalletConnectProvider.default,
-            options: {
-              rpc: { 137: "https://polygon-rpc.com" },
-              chainId: 137
+    function getSelectedToken() {
+      const selected = document.getElementById("tokenSelect").value;
+      if (selected === "custom") {
+        return document.getElementById("customToken").value.trim();
+      }
+      return tokens[selected];
+    }
+
+    async function findBestTrade() {
+      const tokenIn = tokens.usdc;
+      const tokenOut = getSelectedToken();
+      const amountIn = ethers.utils.parseUnits(document.getElementById("tradeAmount").value, 6);
+      const slippage = parseFloat(document.getElementById("slippage").value);
+      const onlyProfit = document.getElementById("onlyProfit").checked;
+
+      let bestProfit = 0;
+      let bestTrade = null;
+
+      for (const [buyName, buyRouterAddr] of Object.entries(routers)) {
+        for (const [sellName, sellRouterAddr] of Object.entries(routers)) {
+          if (buyName === sellName) continue;
+
+          const buyRouter = new ethers.Contract(buyRouterAddr, routerABI, provider);
+          const sellRouter = new ethers.Contract(sellRouterAddr, routerABI, provider);
+
+          try {
+            const [buyAmountOut] = await buyRouter.getAmountsOut(amountIn, [tokenIn, tokenOut]);
+            const [sellAmountOut] = await sellRouter.getAmountsOut(buyAmountOut, [tokenOut, tokenIn]);
+
+            const profit = sellAmountOut.sub(amountIn);
+            if (profit.gt(0) && profit.gt(bestProfit)) {
+              bestProfit = profit;
+              bestTrade = {
+                buyName, sellName, tokenOut, buyRouterAddr, sellRouterAddr,
+                amountIn, buyAmountOut, sellAmountOut
+              };
             }
+          } catch (e) {
+            continue;
           }
         }
-      });
-      connection = await web3Modal.connect();
-      provider = new ethers.providers.Web3Provider(connection);
-      signer = provider.getSigner();
-      userAddress = await signer.getAddress();
-      document.getElementById("walletAddress").textContent = userAddress;
+      }
+
+      if (bestTrade && (!onlyProfit || bestProfit.gt(0))) {
+        await executeTrade(bestTrade);
+      }
+    }
+
+    async function executeTrade({ buyRouterAddr, sellRouterAddr, tokenOut, amountIn, buyAmountOut, sellAmountOut, buyName, sellName }) {
+      const usdc = new ethers.Contract(tokens.usdc, erc20ABI, signer);
+      const tokenContract = new ethers.Contract(tokenOut, erc20ABI, signer);
+      const buyRouter = new ethers.Contract(buyRouterAddr, routerABI, signer);
+      const sellRouter = new ethers.Contract(sellRouterAddr, routerABI, signer);
+
+      const deadline = Math.floor(Date.now() / 1000) + 60;
+      const slippage = parseFloat(document.getElementById("slippage").value);
+      const minBuyOut = buyAmountOut.mul(100 - slippage * 100).div(100);
+      const minSellOut = sellAmountOut.mul(100 - slippage * 100).div(100);
+
+      await usdc.approve(buyRouterAddr, amountIn);
+      const tx1 = await buyRouter.swapExactTokensForTokens(
+        amountIn,
+        minBuyOut,
+        [tokens.usdc, tokenOut],
+        userAddress,
+        deadline
+      );
+      await tx1.wait();
+
+      await tokenContract.approve(sellRouterAddr, buyAmountOut);
+      const tx2 = await sellRouter.swapExactTokensForTokens(
+        buyAmountOut,
+        minSellOut,
+        [tokenOut, tokens.usdc],
+        userAddress,
+        deadline
+      );
+      await tx2.wait();
+
+      const profit = (sellAmountOut.sub(amountIn)).toString();
+      const row = `
+        <tr>
+          <td>${buyName}</td>
+          <td>${sellName}</td>
+          <td>${tokenOut.slice(0, 6)}...</td>
+          <td>${ethers.utils.formatUnits(sellAmountOut, 6)}</td>
+          <td>${ethers.utils.formatUnits(profit, 6)}</td>
+          <td><a href="https://polygonscan.com/tx/${tx2.hash}" target="_blank">View</a></td>
+        </tr>`;
+      document.getElementById("resultsTable").innerHTML += row;
       updateUSDCBalance();
     }
 
     function startTrading() {
       document.getElementById("status").textContent = "Status: Running";
-      // Your arbitrage logic here
+      tradingInterval = setInterval(findBestTrade, 10000);
     }
 
     function stopTrading() {
       document.getElementById("status").textContent = "Status: Stopped";
+      clearInterval(tradingInterval);
     }
   </script>
 </body>
 </html>
+
