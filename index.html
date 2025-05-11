@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <title>Polygon Arbitrage Bot</title>
   <script src="https://cdn.jsdelivr.net/npm/ethers/dist/ethers.min.js"></script>
+  <script src="https://unpkg.com/@walletconnect/web3-provider@1.7.8/dist/umd/index.min.js"></script>
   <style>
     body {
       background-color: #013220;
@@ -37,11 +38,11 @@
 <body>
   <h2>Polygon Arbitrage Interface</h2>
 
-  <!-- Wallet Connection Buttons -->
+  <!-- Wallet Connections -->
   <div>
     <button onclick="connectMetaMask()">Connect MetaMask</button>
-    <button onclick="alert('WalletConnect is not implemented in this version.')">Connect WalletConnect</button>
-    <button onclick="alert('Deep Link connection is not implemented in this version.')">Connect Deep Link</button>
+    <button onclick="connectWalletConnect()">Connect WalletConnect</button>
+    <button onclick="connectDeepLink()">Connect Deep Link</button>
     <p><strong>Wallet:</strong> <span id="walletAddress">Not connected</span></p>
     <p><strong>USDC Balance:</strong> <span id="usdcBalance">0</span></p>
   </div>
@@ -63,7 +64,7 @@
     <label><input type="checkbox" id="onlyProfit" checked /> Only Trade if Profitable</label>
   </div>
 
-  <!-- Start/Stop Arbitrage -->
+  <!-- Start/Stop Trading -->
   <div>
     <button onclick="startTrading()">Start Trading</button>
     <button onclick="stopTrading()">Stop Trading</button>
@@ -86,9 +87,7 @@
   </table>
 
 <script>
-let provider, signer, userAddress;
-let trading = false;
-let tradeInterval;
+let provider, signer, userAddress, trading = false, tradeInterval;
 
 const tokens = {
   weth: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
@@ -112,30 +111,47 @@ const routerABI = [
   "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory)"
 ];
 
+// MetaMask
 async function connectMetaMask() {
-  if (typeof window.ethereum === 'undefined') {
-    alert("MetaMask is not installed.");
-    return;
-  }
-  try {
-    provider = new ethers.providers.Web3Provider(window.ethereum);
-    await provider.send("eth_requestAccounts", []);
-    signer = provider.getSigner();
-    userAddress = await signer.getAddress();
-    document.getElementById("walletAddress").textContent = userAddress;
-    await updateUSDCBalance();
-  } catch (err) {
-    console.error(err);
-    alert("Connection failed.");
-  }
+  if (typeof window.ethereum === 'undefined') return alert("MetaMask is not installed.");
+  provider = new ethers.providers.Web3Provider(window.ethereum);
+  await provider.send("eth_requestAccounts", []);
+  signer = provider.getSigner();
+  userAddress = await signer.getAddress();
+  document.getElementById("walletAddress").textContent = userAddress;
+  await updateUSDCBalance();
 }
 
+// WalletConnect
+async function connectWalletConnect() {
+  const walletConnectProvider = new WalletConnectProvider.default({
+    rpc: {
+      137: "https://polygon-rpc.com"
+    },
+    chainId: 137
+  });
+  await walletConnectProvider.enable();
+  provider = new ethers.providers.Web3Provider(walletConnectProvider);
+  signer = provider.getSigner();
+  userAddress = await signer.getAddress();
+  document.getElementById("walletAddress").textContent = userAddress;
+  await updateUSDCBalance();
+}
+
+// Deep Link (Example Placeholder)
+function connectDeepLink() {
+  const deepLink = "https://metamask.app.link/dapp/yourdomain.com";
+  window.location.href = deepLink;
+}
+
+// Balance
 async function updateUSDCBalance() {
   const usdc = new ethers.Contract(tokens.usdc, erc20ABI, provider);
   const balance = await usdc.balanceOf(userAddress);
   document.getElementById("usdcBalance").textContent = (balance / 1e6).toFixed(2);
 }
 
+// Start / Stop
 function startTrading() {
   trading = true;
   document.getElementById("status").textContent = "Status: Running";
@@ -148,6 +164,7 @@ function stopTrading() {
   document.getElementById("status").textContent = "Status: Stopped";
 }
 
+// Arbitrage Logic
 async function performArbitrage() {
   const tokenKey = document.getElementById("tokenSelect").value;
   const customToken = document.getElementById("customToken").value.trim();
@@ -156,8 +173,7 @@ async function performArbitrage() {
   const slippagePct = parseFloat(document.getElementById("slippage").value) / 100;
   const onlyProfit = document.getElementById("onlyProfit").checked;
 
-  let bestTrade = null;
-  let bestProfit = ethers.BigNumber.from(0);
+  let bestTrade = null, bestProfit = ethers.BigNumber.from(0);
 
   for (let buy in routers) {
     for (let sell in routers) {
@@ -170,14 +186,13 @@ async function performArbitrage() {
         const sellOut = await sellRouter.getAmountsOut(tokenReceived, [token, tokens.usdc]);
         const usdcOut = sellOut[1];
         const profit = usdcOut.sub(amountIn);
-
         if (!onlyProfit || profit.gt(0)) {
           if (profit.gt(bestProfit)) {
             bestProfit = profit;
             bestTrade = { buy, sell, tokenReceived, usdcOut, profit, buyRouter, sellRouter };
           }
         }
-      } catch (e) {}
+      } catch {}
     }
   }
 
